@@ -412,11 +412,7 @@
 
     try {
       let response;
-      if (window.location.hostname == "lyc8503.github.io") {
-        response = await fetch('https://github.com/lyc8503/AITextDetector/releases/download/model/models.json');
-      } else {
-        response = await fetch('models.json');
-      }
+      response = await fetch('models.json');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       // Stream the body to show download progress when Content-Length is known
