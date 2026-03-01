@@ -25,6 +25,7 @@ import joblib
 import numpy as np
 import json
 
+MODEL_DIR   = os.path.join(os.path.dirname(__file__), '..', 'model')
 SRCWEB_DIR  = os.path.join(os.path.dirname(__file__), '..', 'srcweb')
 OUTPUT_PATH = os.path.join(SRCWEB_DIR, 'models.json')
 
@@ -35,8 +36,8 @@ def export():
     for model_name in gen_folders.keys():
         print(f"Exporting {model_name} …", end="  ", flush=True)
 
-        tfidf_path = os.path.join(SRCWEB_DIR, f'tfidf_{model_name}.joblib')
-        model_path = os.path.join(SRCWEB_DIR, f'model_{model_name}.joblib')
+        tfidf_path = os.path.join(MODEL_DIR, f'tfidf_{model_name}.joblib')
+        model_path = os.path.join(MODEL_DIR, f'model_{model_name}.joblib')
 
         if not os.path.exists(tfidf_path) or not os.path.exists(model_path):
             print("SKIP (joblib files not found)")

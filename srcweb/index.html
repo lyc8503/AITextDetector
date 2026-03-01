@@ -126,14 +126,48 @@
       margin-right: 3px;
     }
 
-    /* Stats bar */
-    #stats, #charStats, #weightedStats {
-      margin-top: 10px;
+    /* Stats bar — gray secondary lines */
+    #stats, #weightedStats {
+      margin-top: 6px;
       font-size: 13px;
-      color: #555;
+      color: #999;
       min-height: 18px;
     }
-    #charStats, #weightedStats { margin-top: 4px; }
+
+    /* Verdict + char AI rate — prominent */
+    #verdict {
+      margin-top: 14px;
+      font-size: 15px;
+      color: #444;
+      min-height: 22px;
+    }
+    .verdict-badge {
+      display: inline-block;
+      padding: 2px 13px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 15px;
+      margin-left: 5px;
+    }
+    .verdict-human       { background: #d4edda; color: #155724; }
+    .verdict-maybe-human { background: #fff3cd; color: #856404; }
+    .verdict-maybe-ai    { background: #f8d7da; color: #721c24; }
+
+    #charStats {
+      margin-top: 5px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #333;
+      min-height: 18px;
+    }
+
+    /* Per-model breakdown — gray */
+    #modelStats {
+      margin-top: 4px;
+      font-size: 13px;
+      color: #999;
+      min-height: 18px;
+    }
   </style>
 </head>
 <body>
@@ -155,8 +189,10 @@
     <span style="color:#999">Hover highlighted text to see which models flagged it.</span>
   </div>
 
-  <div id="stats"></div>
+  <div id="verdict"></div>
   <div id="charStats"></div>
+  <div id="modelStats"></div>
+  <div id="stats"></div>
   <div id="weightedStats"></div>
   <div id="result">Results will appear here…</div>
 
@@ -281,13 +317,16 @@
     const statsDiv  = document.getElementById('stats');
     resultDiv.innerHTML = '';
 
-    let aiChunks       = 0;
-    let totalChunks    = 0;
-    let aiChars        = 0;
-    let totalChars     = 0;
+    let aiChunks        = 0;
+    let totalChunks     = 0;
+    let aiChars         = 0;
+    let totalChars      = 0;
     let weightedAiChars = 0;
 
     const MODEL_WEIGHT = { 2: 0.33, 3: 0.66 };  // 4+ → 1.0
+
+    // Per-model char counts
+    const modelCharCounts = Object.fromEntries(MODEL_NAMES.map(n => [n, 0]));
 
     for (const item of results) {
       if (item.clean.length < 5) {
@@ -303,6 +342,7 @@
         aiChars += item.clean.length;
         const w = MODEL_WEIGHT[item.models.length] ?? 1.0;
         weightedAiChars += item.clean.length * w;
+        for (const m of item.models) modelCharCounts[m] += item.clean.length;
         const span = document.createElement('span');
         const n    = item.models.length;
         span.className = 'ai-text ai-text-' + Math.min(n, 4);
@@ -314,19 +354,44 @@
       }
     }
 
+    const charPctNum = totalChars > 0 ? (aiChars / totalChars) * 100 : 0;
+    const charPctStr = charPctNum.toFixed(1);
+
+    // ── Verdict ──────────────────────────────────────────────────────────
+    let verdictLabel, verdictClass;
+    if (charPctNum < 50) {
+      verdictLabel = 'Human (<50%)';       verdictClass = 'verdict-human';
+    } else if (charPctNum <= 70) {
+      verdictLabel = 'Maybe Human (50%-70%)'; verdictClass = 'verdict-maybe-human';
+    } else {
+      verdictLabel = 'Maybe AI (>70%)';    verdictClass = 'verdict-maybe-ai';
+    }
+    document.getElementById('verdict').innerHTML =
+      `Overall: <span class="verdict-badge ${verdictClass}">${verdictLabel}</span>`;
+
+    // ── Char stats ───────────────────────────────────────────────────────
+    document.getElementById('charStats').textContent =
+      `${aiChars.toLocaleString()} / ${totalChars.toLocaleString()} chars flagged as AI (${charPctStr}%)`;
+
+    // ── Per-model breakdown (sorted high → low) ──────────────────────────
+    const modelEntries = MODEL_NAMES
+      .map(name => ({ name, chars: modelCharCounts[name] }))
+      .sort((a, b) => b.chars - a.chars);
+    document.getElementById('modelStats').textContent =
+      'By model: ' + modelEntries.map(({ name, chars }) => {
+        const pct = totalChars > 0 ? ((chars / totalChars) * 100).toFixed(1) : '0.0';
+        return `${name} ${pct}%`;
+      }).join(' · ');
+
+    // ── Sentence stats ───────────────────────────────────────────────────
     const pct = totalChunks > 0
       ? ((aiChunks / totalChunks) * 100).toFixed(1)
       : 0;
     statsDiv.textContent =
       `${aiChunks} / ${totalChunks} sentences flagged as AI (${pct}%)`;
 
-    const charPct = totalChars > 0
-      ? ((aiChars / totalChars) * 100).toFixed(1)
-      : 0;
-    document.getElementById('charStats').textContent =
-      `${aiChars.toLocaleString()} / ${totalChars.toLocaleString()} chars flagged as AI (${charPct}%)`;
-
-    const wAi = Math.round(weightedAiChars);
+    // ── Weighted stats ───────────────────────────────────────────────────
+    const wAi  = Math.round(weightedAiChars);
     const wPct = totalChars > 0
       ? ((weightedAiChars / totalChars) * 100).toFixed(1)
       : 0;
@@ -346,7 +411,12 @@
     status.textContent = 'Downloading models.json…';
 
     try {
-      const response = await fetch('models.json');
+      let response;
+      if (window.location.hostname == "lyc8503.github.io") {
+        response = await fetch('https://github.com/lyc8503/AITextDetector/releases/download/model/models.json');
+      } else {
+        response = await fetch('models.json');
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       // Stream the body to show download progress when Content-Length is known
@@ -399,8 +469,10 @@
     btn.disabled    = true;
     btn.textContent = 'Analyzing…';
     document.getElementById('result').textContent        = '';
-    document.getElementById('stats').textContent         = '';
+    document.getElementById('verdict').textContent       = '';
     document.getElementById('charStats').textContent     = '';
+    document.getElementById('modelStats').textContent    = '';
+    document.getElementById('stats').textContent         = '';
     document.getElementById('weightedStats').textContent = '';
 
     // Yield to the browser for a repaint, then classify synchronously
