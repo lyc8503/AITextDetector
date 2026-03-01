@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Text Detection</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 20px;
+      line-height: 1.6;
+      color: #222;
+    }
+
+    h1 { text-align: center; color: #333; margin-bottom: 4px; }
+    .subtitle { text-align: center; color: #666; margin-top: 0; font-size: 14px; }
+
+    textarea {
+      width: 100%;
+      height: 200px;
+      padding: 10px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      resize: vertical;
+    }
+
+    button {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      margin-top: 10px;
+      font-size: 16px;
+      color: #fff;
+      background-color: #007bff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color .15s;
+    }
+    button:hover  { background-color: #0056b3; }
+    button:disabled { background-color: #aaa; cursor: not-allowed; }
+
+    /* Loading bar */
+    #loadingBar {
+      width: 100%;
+      height: 4px;
+      background: #e9ecef;
+      border-radius: 2px;
+      margin-top: 8px;
+      overflow: hidden;
+      display: none;
+    }
+    #loadingBar .fill {
+      height: 100%;
+      width: 0%;
+      background: #007bff;
+      transition: width .3s ease;
+    }
+    #loadingStatus {
+      font-size: 13px;
+      color: #666;
+      margin-top: 4px;
+      min-height: 18px;
+    }
+
+    /* Result area */
+    #result {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #eee;
+      border-radius: 4px;
+      background: #f9f9f9;
+      white-space: pre-wrap;
+      min-height: 100px;
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    /* Highlighted spans */
+    .ai-text {
+      border-radius: 2px;
+      cursor: help;
+      position: relative;
+    }
+    .ai-text-2 { background-color: #fffacd; }   /* 2 models – light yellow */
+    .ai-text-3 { background-color: #ffd700; }   /* 3 models – yellow       */
+    .ai-text-4 { background-color: #ffcccc; }   /* 4+ models – pink/red    */
+
+    .ai-text:hover::after {
+      content: attr(data-models);
+      position: absolute;
+      bottom: 110%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #333;
+      color: #fff;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      white-space: nowrap;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    /* Legend */
+    .legend {
+      margin-top: 8px;
+      font-size: 13px;
+      color: #555;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    .legend-swatch {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 2px;
+      vertical-align: middle;
+      margin-right: 3px;
+    }
+
+    /* Stats bar */
+    #stats, #charStats, #weightedStats {
+      margin-top: 10px;
+      font-size: 13px;
+      color: #555;
+      min-height: 18px;
+    }
+    #charStats, #weightedStats { margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>AI Text Detection</h1>
+  <p class="subtitle">
+    Fully client-side · TF-IDF char n-gram + Linear SVM · 7 binary classifiers
+  </p>
+
+  <div id="loadingBar"><div class="fill" id="loadingFill"></div></div>
+  <div id="loadingStatus">Loading models…</div>
+
+  <textarea id="inputText" placeholder="Paste Chinese text here…" disabled></textarea>
+  <button id="analyzeBtn" disabled>Analyze Text</button>
+
+  <div class="legend">
+    <span><span class="legend-swatch" style="background:#fffacd"></span>2 models</span>
+    <span><span class="legend-swatch" style="background:#ffd700"></span>3 models</span>
+    <span><span class="legend-swatch" style="background:#ffcccc"></span>4+ models</span>
+    <span style="color:#999">Hover highlighted text to see which models flagged it.</span>
+  </div>
+
+  <div id="stats"></div>
+  <div id="charStats"></div>
+  <div id="weightedStats"></div>
+  <div id="result">Results will appear here…</div>
+
+  <script>
+  'use strict';
+
+  // ── Constants ────────────────────────────────────────────────────────────
+  const MODEL_NAMES = [
+    'gemini', 'qwen', 'pony', 'kimi25', 'glm47', 'doubao', 'deepseekv32'
+  ];
+
+  // Regex mirrors the Python server: keep Chinese + basic ASCII + fullwidth
+  const CLEAN_RE = /[^a-zA-Z0-9\n,.;?!\u4e00-\u9fa5\u3000-\u303f\uff00-\uffef]/g;
+  // Sentence-ending punctuation (same delimiters as server.py)
+  const SPLIT_RE  = /([。！？；?!\n])/g;
+
+  // ── State ────────────────────────────────────────────────────────────────
+  let modelsData = null;   // { modelName: { weights, intercept } }
+
+  // ── Utilities ────────────────────────────────────────────────────────────
+
+  /**
+   * Split text on sentence-ending punctuation, keeping delimiters attached
+   * to the preceding chunk (same behaviour as server.py).
+   */
+  function splitText(text) {
+    const parts  = text.split(SPLIT_RE);
+    const chunks = [];
+    for (let i = 0; i < parts.length; i += 2) {
+      let chunk = parts[i];
+      if (i + 1 < parts.length) chunk += parts[i + 1];
+      if (chunk) chunks.push(chunk);
+    }
+    return chunks;
+  }
+
+  function cleanChunk(chunk) {
+    return chunk.replace(CLEAN_RE, '').trim();
+  }
+
+  // ── Inference ────────────────────────────────────────────────────────────
+
+  /**
+   * Run all 7 binary classifiers on a (pre-cleaned) text chunk.
+   *
+   * Inference (mirrors sklearn with norm='l2', sublinear_tf=True):
+   *   tf = 1 + ln(count)
+   *   raw = Σ tf · combined   (combined = idf · coef, precomputed)
+   *   norm = sqrt(Σ (tf · idf)²)
+   *   score = raw / norm + intercept
+   *
+   * weights[gram] = [combined, idf]
+   *
+   * @param {string} text  Cleaned chunk (≥ 5 chars)
+   * @returns {string[]}   Names of models that flagged the chunk as AI
+   */
+  function classifyChunk(text) {
+    // Count char n-grams (2–5) — must match training ngram_range=(2,5)
+    const counts = Object.create(null);
+    const len = text.length;
+    for (let n = 2; n <= 5; n++) {
+      const stop = len - n + 1;
+      for (let i = 0; i < stop; i++) {
+        const gram = text.slice(i, i + n);
+        counts[gram] = (counts[gram] || 0) + 1;
+      }
+    }
+
+    const aiModels = [];
+
+    for (const name of MODEL_NAMES) {
+      const { weights, intercept } = modelsData[name];
+
+      let rawScore = 0;
+      let normSq   = 0;
+      for (const gram in counts) {
+        const w = weights[gram];
+        if (w !== undefined) {
+          const tf = 1 + Math.log(counts[gram]);
+          const combined = w[0];  // idf · coef
+          const idf      = w[1];
+          rawScore += tf * combined;
+          normSq   += (tf * idf) * (tf * idf);
+        }
+      }
+
+      if (normSq < 1e-30) {
+        if (intercept > 0) aiModels.push(name);
+        continue;
+      }
+      const decision = rawScore / Math.sqrt(normSq) + intercept;
+      if (decision > 0) aiModels.push(name);
+    }
+
+    return aiModels;
+  }
+
+  /**
+   * Analyse full text: split into chunks, classify each one.
+   */
+  function analyzeText(text) {
+    const chunks  = splitText(text);
+    const results = [];
+
+    for (const chunk of chunks) {
+      const clean = cleanChunk(chunk);
+      if (clean.length >= 5) {
+        const models = classifyChunk(clean);
+        results.push({ text: chunk, clean, is_ai: models.length >= 2, models });
+      } else {
+        results.push({ text: chunk, clean, is_ai: false, models: [] });
+      }
+    }
+
+    return results;
+  }
+
+  // ── Rendering ────────────────────────────────────────────────────────────
+
+  function renderResults(results) {
+    const resultDiv = document.getElementById('result');
+    const statsDiv  = document.getElementById('stats');
+    resultDiv.innerHTML = '';
+
+    let aiChunks       = 0;
+    let totalChunks    = 0;
+    let aiChars        = 0;
+    let totalChars     = 0;
+    let weightedAiChars = 0;
+
+    const MODEL_WEIGHT = { 2: 0.33, 3: 0.66 };  // 4+ → 1.0
+
+    for (const item of results) {
+      if (item.clean.length < 5) {
+        resultDiv.appendChild(document.createTextNode(item.text));
+        totalChars += item.clean.length;
+        continue;
+      }
+      totalChunks++;
+      totalChars += item.clean.length;
+
+      if (item.is_ai) {
+        aiChunks++;
+        aiChars += item.clean.length;
+        const w = MODEL_WEIGHT[item.models.length] ?? 1.0;
+        weightedAiChars += item.clean.length * w;
+        const span = document.createElement('span');
+        const n    = item.models.length;
+        span.className = 'ai-text ai-text-' + Math.min(n, 4);
+        span.textContent = item.text;
+        span.setAttribute('data-models', 'Flagged by: ' + item.models.join(', '));
+        resultDiv.appendChild(span);
+      } else {
+        resultDiv.appendChild(document.createTextNode(item.text));
+      }
+    }
+
+    const pct = totalChunks > 0
+      ? ((aiChunks / totalChunks) * 100).toFixed(1)
+      : 0;
+    statsDiv.textContent =
+      `${aiChunks} / ${totalChunks} sentences flagged as AI (${pct}%)`;
+
+    const charPct = totalChars > 0
+      ? ((aiChars / totalChars) * 100).toFixed(1)
+      : 0;
+    document.getElementById('charStats').textContent =
+      `${aiChars.toLocaleString()} / ${totalChars.toLocaleString()} chars flagged as AI (${charPct}%)`;
+
+    const wAi = Math.round(weightedAiChars);
+    const wPct = totalChars > 0
+      ? ((weightedAiChars / totalChars) * 100).toFixed(1)
+      : 0;
+    document.getElementById('weightedStats').textContent =
+      `${wAi.toLocaleString()} / ${totalChars.toLocaleString()} chars (weighted) flagged as AI (${wPct}%)  [2-model×0.33, 3-model×0.66, 4+×1.0]`;
+  }
+
+  // ── Model loading ─────────────────────────────────────────────────────────
+
+  async function loadModels() {
+    const bar    = document.getElementById('loadingBar');
+    const fill   = document.getElementById('loadingFill');
+    const status = document.getElementById('loadingStatus');
+
+    bar.style.display = 'block';
+    fill.style.width  = '10%';
+    status.textContent = 'Downloading models.json…';
+
+    try {
+      const response = await fetch('models.json');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      // Stream the body to show download progress when Content-Length is known
+      const contentLength = response.headers.get('Content-Length');
+      if (contentLength && response.body) {
+        const total   = parseInt(contentLength, 10);
+        const reader  = response.body.getReader();
+        const chunks  = [];
+        let received  = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          fill.style.width = (10 + 80 * received / total).toFixed(1) + '%';
+        }
+        fill.style.width = '95%';
+        status.textContent = 'Parsing models…';
+        const text = await new Blob(chunks).text();
+        modelsData = JSON.parse(text);
+      } else {
+        fill.style.width = '60%';
+        modelsData = await response.json();
+      }
+
+      fill.style.width = '100%';
+      status.textContent =
+        `Ready — ${MODEL_NAMES.length} classifiers loaded.`;
+
+      document.getElementById('inputText').disabled  = false;
+      document.getElementById('analyzeBtn').disabled = false;
+
+      setTimeout(() => { bar.style.display = 'none'; }, 800);
+
+    } catch (err) {
+      status.textContent = `⚠ Failed to load models: ${err.message}`;
+      fill.style.background = '#dc3545';
+      fill.style.width = '100%';
+    }
+  }
+
+  // ── Event wiring ──────────────────────────────────────────────────────────
+
+  document.getElementById('analyzeBtn').addEventListener('click', () => {
+    const text = document.getElementById('inputText').value;
+    const btn  = document.getElementById('analyzeBtn');
+
+    if (!text.trim()) { alert('Please enter some text.'); return; }
+
+    btn.disabled    = true;
+    btn.textContent = 'Analyzing…';
+    document.getElementById('result').textContent        = '';
+    document.getElementById('stats').textContent         = '';
+    document.getElementById('charStats').textContent     = '';
+    document.getElementById('weightedStats').textContent = '';
+
+    // Yield to the browser for a repaint, then classify synchronously
+    setTimeout(() => {
+      try {
+        const results = analyzeText(text);
+        renderResults(results);
+      } catch (err) {
+        document.getElementById('result').innerHTML =
+          `<span style="color:red">Error: ${err.message}</span>`;
+      } finally {
+        btn.disabled    = false;
+        btn.textContent = 'Analyze Text';
+      }
+    }, 0);
+  });
+
+  // ── Bootstrap ─────────────────────────────────────────────────────────────
+  loadModels();
+  </script>
+</body>
+</html>
