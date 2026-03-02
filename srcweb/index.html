@@ -173,13 +173,13 @@
 <body>
   <h1>AI Text Detection</h1>
   <p class="subtitle">
-    Fully client-side · TF-IDF char n-gram + Linear SVM · 7 binary classifiers
+    使用前请阅读 / READ BEFORE USE: <a target="_blank" href="https://blog.lyc8503.net/post/llm-classifier">https://blog.lyc8503.net/post/llm-classifier</a>
   </p>
 
   <div id="loadingBar"><div class="fill" id="loadingFill"></div></div>
-  <div id="loadingStatus">Loading models…</div>
+  <div id="loadingStatus">Model not loaded — confirm the download to start.</div>
 
-  <textarea id="inputText" placeholder="Paste Chinese text here…" disabled></textarea>
+  <textarea id="inputText" placeholder="在此处输入网络小说或同人创作的中文内容，输入其他内容可能导致结果不准确 / Enter Chinese content from web novels or fan fiction here. Inputting other content may result in inaccurate output" disabled></textarea>
   <button id="analyzeBtn" disabled>Analyze Text</button>
 
   <div class="legend">
@@ -407,40 +407,66 @@
     const status = document.getElementById('loadingStatus');
 
     bar.style.display = 'block';
-    fill.style.width  = '10%';
+    fill.style.width  = '0%';
     status.textContent = 'Downloading models.json…';
 
+    function fmtMB(bytes) {
+      return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+
     try {
-      let response;
-      response = await fetch('models.json');
+      const response = await fetch('models.json');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-      // Stream the body to show download progress when Content-Length is known
+      // Content-Length is the *compressed* size (gzip); received bytes are
+      // *decompressed*, so received can exceed total — clamp to avoid overshoot.
+      // On lyc8503.github.io the server sends gzip Content-Length, so we use
+      // the known decompressed size of models.json instead.
       const contentLength = response.headers.get('Content-Length');
-      if (contentLength && response.body) {
-        const total   = parseInt(contentLength, 10);
-        const reader  = response.body.getReader();
-        const chunks  = [];
-        let received  = 0;
+      const KNOWN_DECOMPRESSED = 112338400;  // bytes, decompressed models.json
+      const total = location.hostname === 'lyc8503.github.io'
+        ? KNOWN_DECOMPRESSED
+        : (contentLength ? parseInt(contentLength, 10) : null);
+
+      if (response.body) {
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
           received += value.length;
-          fill.style.width = (10 + 80 * received / total).toFixed(1) + '%';
+
+          if (total) {
+            // Clamp ratio to [0, 1] so gzip decompression never overshoots
+            const ratio = Math.min(received / total, 1.0);
+            fill.style.width = (ratio * 80).toFixed(1) + '%';
+            const pct = (ratio * 100).toFixed(0);
+            status.textContent =
+              `Downloading… ${fmtMB(received)} / ${fmtMB(total)} (${pct}%)`;
+          } else {
+            fill.style.width = '40%';
+            status.textContent = `Downloading… ${fmtMB(received)}`;
+          }
         }
-        fill.style.width = '95%';
-        status.textContent = 'Parsing models…';
+
+        // Parse phase: 80 % → 100 %
+        fill.style.width = '80%';
+        status.textContent = `Parsing models… (${fmtMB(received)} received)`;
+        await new Promise(r => setTimeout(r, 0));   // yield for repaint
+
         const text = await new Blob(chunks).text();
         modelsData = JSON.parse(text);
       } else {
-        fill.style.width = '60%';
+        fill.style.width = '80%';
+        status.textContent = 'Parsing models…';
         modelsData = await response.json();
       }
 
       fill.style.width = '100%';
-      status.textContent =
-        `Ready — ${MODEL_NAMES.length} classifiers loaded.`;
+      status.textContent = `Ready — ${MODEL_NAMES.length} classifiers loaded.`;
 
       document.getElementById('inputText').disabled  = false;
       document.getElementById('analyzeBtn').disabled = false;
@@ -487,7 +513,27 @@
   });
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
-  loadModels();
+  {
+    const isChinese = /^zh\b/i.test(navigator.language);
+    const _ = isChinese ? alert(
+      'AI 生成文本检测 Demo\n' +
+      '1. 使用前, 十分建议先阅读 https://blog.lyc8503.net/post/llm-classifier 了解此 Demo 的背景与实现细节再使用.\n' +
+      '2. 此 AI 检测模型非通用模型, 仅在中文创意写作(网络小说/同人二创)场景训练, 输入其他类型的文本会导致系统性误差, 其结果应视为无效.\n' +
+      '3. 此模型完全在你的设备上本地运行, 你输入的所有数据不会离开你的设备, 更不会被收集用于任何形式的生成式 AI 训练; 如点击确定, 此网页将会下载并加载 ~107MB 的模型参数, 压缩后预计消耗 ~40MB 流量.\n' +
+      '4. 该网页使用词频概率统计的方法判断 AI 生成文本的特征, 你可以通过 F12 看到全部代码, 它并不能调用神谕, 也非真理机器. 尽管我已尽力优化准确率, 但输出结果不能作为判断 AI 生成文本的唯一依据, 请谨慎判断, 尊重原创作者的产出.\n' +
+      '5. 结果解读上, 为防止误读会给出一个整体判断结果 (Overall); 特别注意: 任何 AI 检出率低于 50% 的文本, 都应被视作人类创作的文本.\n\n' +
+      '点击确认以下载模型并使用此 Demo'
+    ) : alert(
+      'AI-generated Text Detection Demo\n' +
+      '1. Before using, it is highly recommended to first read https://blog.lyc8503.net/post/llm-classifier to understand the background and implementation details of this Demo.\n' +
+      '2. This AI detection model is not a general-purpose model. It is only trained for Chinese creative writing (web novels/fan fiction) scenarios. Inputting other types of text will cause systematic errors, and the results should be considered invalid.\n' +
+      '3. This model runs entirely locally on your device. All data you input will not leave your device, nor will it be collected for any form of generative AI training. If you click OK, this webpage will download and load ~107MB of model parameters, which is estimated to consume ~40MB of traffic after compression.\n' +
+      '4. This webpage uses word frequency probability statistics to identify characteristics of AI-generated text. You can view all the code via F12. It cannot invoke oracles, nor is it a truth machine. Although I have done my best to optimize accuracy, the output results cannot be used as the sole basis for judging AI-generated text. Please judge carefully and respect the output of original authors.\n' +
+      '5. Regarding result interpretation, an overall judgment result (Overall) will be provided to prevent misreading. Special note: Any text with an AI detection rate below 50% should be considered as human-created text.\n\n' +
+      'Click OK to download the model and use this Demo'
+    );
+    loadModels();
+  }
   </script>
 </body>
 </html>
