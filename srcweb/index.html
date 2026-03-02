@@ -337,12 +337,13 @@
       totalChunks++;
       totalChars += item.clean.length;
 
+      for (const m of item.models) modelCharCounts[m] += item.clean.length;
+
       if (item.is_ai) {
         aiChunks++;
         aiChars += item.clean.length;
         const w = MODEL_WEIGHT[item.models.length] ?? 1.0;
         weightedAiChars += item.clean.length * w;
-        for (const m of item.models) modelCharCounts[m] += item.clean.length;
         const span = document.createElement('span');
         const n    = item.models.length;
         span.className = 'ai-text ai-text-' + Math.min(n, 4);
