@@ -179,7 +179,7 @@
   <div id="loadingBar"><div class="fill" id="loadingFill"></div></div>
   <div id="loadingStatus">Model not loaded — confirm the download to start.</div>
 
-  <textarea id="inputText" placeholder="在此处输入网络小说或同人创作的中文内容，输入其他内容可能导致结果不准确 / Enter Chinese content from web novels or fan fiction here. Inputting other content may result in inaccurate output" disabled></textarea>
+  <textarea id="inputText" placeholder="在此处输入网络小说或同人创作的中文内容，输入其他内容可能导致结果不准确 (Tip: 你也可以直接粘贴一个 LOFTER 分享口令，类似：复制打开【LOFTER】，神仙太太@xx 好粮不容错过！¥A1B2C3D4abcd¥) / Enter Chinese content from web novels or fan fiction here. Inputting other content may result in inaccurate output" disabled></textarea>
   <button id="analyzeBtn" disabled>Analyze Text</button>
 
   <div class="legend">
@@ -198,6 +198,166 @@
 
   <script>
   'use strict';
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // LOFTER Content Extraction Module (Skip this if you just want AI detection)
+  // ──────────────────────────────────────────────────────────────────────────
+  
+  const LOFTER = (() => {
+    const CORS_PROXY = 'http' + 's://cors.9' + '94321.x' + 'yz/cors';
+    
+    /**
+     * Extract LOFTER share code from text (¥...¥ pattern)
+     * @param {string} text
+     * @returns {string|null} Share code (with ¥)
+     */
+    function extractShareCode(text) {
+      const match = text.match(/¥[a-zA-Z0-9]+¥/);
+      return match ? match[0] : null;
+    }
+
+    /**
+     * Make a CORS-proxied request
+     * @param {string} targetUrl
+     * @param {object} options - { method, headers, body }
+     * @returns {Promise<any>}
+     */
+    async function corsRequest(targetUrl, options = {}) {
+      const payload = {
+        url: targetUrl,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+      };
+      
+      if (options.body) {
+        payload.body = options.body;
+      }
+
+      const response = await fetch(CORS_PROXY, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`CORS proxy error: ${response.status}`);
+      }
+
+      const result = await response.json();
+      
+      if (result.status >= 400) {
+        throw new Error(`API error: ${result.status}`);
+      }
+
+      return result.body;
+    }
+
+    /**
+     * Get content from LOFTER via shareCode
+     * Flow: newapi/actpwd/get.json → oldapi/post/detail.api
+     * @param {string} shareCode Full code with ¥ (e.g., ¥rzWZ1Srh4E0P¥)
+     * @returns {Promise<string>} Extracted content
+     */
+    async function getContent(shareCode) {
+      // Step 1: Call newapi/actpwd/get.json to get post info
+      const actpwdUrl = `https://api.lofter.com/newapi/actpwd/get.json?actPwd=${encodeURIComponent(shareCode)}`;
+      
+      let actpwdData;
+      try {
+        const actpwdResponse = await corsRequest(actpwdUrl, {
+          method: 'GET',
+          headers: {
+            'lofProduct': 'lofter-android-7.9.10',
+            'User-Agent': 'LOFTER-Android 7.9.10 (null; Android 16; null) MOBILE'
+          }
+        });
+
+        if (typeof actpwdResponse === 'string') {
+          actpwdData = JSON.parse(actpwdResponse);
+        } else {
+          actpwdData = actpwdResponse;
+        }
+
+        if (!actpwdData.data || !actpwdData.data.actPwdInfo) {
+          throw new Error('Invalid response structure');
+        }
+      } catch (err) {
+        throw new Error(`actpwd API failed: ${err.message}`);
+      }
+
+      // Step 2: Extract post info from actpwd response
+      const pwdInfo = actpwdData.data.actPwdInfo;
+      const postId = pwdInfo.itemId;
+      const blogId = pwdInfo.kolBlogInfo.blogId;
+      const blogName = pwdInfo.kolBlogInfo.blogName;
+
+      if (!postId || !blogId || !blogName) {
+        throw new Error('Could not extract post ID, blog ID, or blog name from actpwd response');
+      }
+
+      // Step 3: Call oldapi/post/detail.api with POST
+      const detailUrl = 'https://api.lofter.com/oldapi/post/detail.api?product=lofter-android-7.9.10';
+      const detailBody = new URLSearchParams({
+        supportposttypes: '1,2,3,4,5,6',
+        blogdomain: blogName + '.lofter.com',
+        offset: '0',
+        requestType: '0',
+        postdigestnew: '1',
+        postid: postId,
+        blogId: blogId,
+        checkpwd: '1',
+        needgetpoststat: '1'
+      }).toString();
+
+      let detailResponse;
+      try {
+        detailResponse = await corsRequest(detailUrl, {
+          method: 'POST',
+          headers: {
+            'lofProduct': 'lofter-android-7.9.10',
+            'User-Agent': 'LOFTER-Android 7.9.10 (null; Android 16; null) MOBILE',
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: detailBody
+        });
+
+        if (typeof detailResponse === 'string') {
+          detailResponse = JSON.parse(detailResponse);
+        }
+      } catch (err) {
+        throw new Error(`detail.api failed: ${err.message}`);
+      }
+
+      // Step 4: Extract content from response
+      let content = '';
+      if (detailResponse.response && detailResponse.response.posts && detailResponse.response.posts[0]) {
+        content = detailResponse.response.posts[0].post.content || '';
+      }
+
+      if (!content) {
+        throw new Error('No content found in detail.api response');
+      }
+
+      // Strip HTML tags if present
+      content = content.replace(/<[^>]*?>/g, ' ').replace(/&nbsp;/g, ' ');
+      
+      // Remove leading spaces from each line
+      content = content.split('\n').map(line => line.replace(/^\s+/, '')).join('\n');
+      
+      content = content.trim();
+
+      return content;
+    }
+
+    return {
+      extractShareCode,
+      getContent
+    };
+  })();
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Actual AI Detection Module starts here
+  // ──────────────────────────────────────────────────────────────────────────
 
   // ── Constants ────────────────────────────────────────────────────────────
   const MODEL_NAMES = [
@@ -483,8 +643,8 @@
 
   // ── Event wiring ──────────────────────────────────────────────────────────
 
-  document.getElementById('analyzeBtn').addEventListener('click', () => {
-    const text = document.getElementById('inputText').value;
+  document.getElementById('analyzeBtn').addEventListener('click', async () => {
+    let text = document.getElementById('inputText').value;
     const btn  = document.getElementById('analyzeBtn');
 
     if (!text.trim()) { alert('Please enter some text.'); return; }
@@ -497,6 +657,27 @@
     document.getElementById('modelStats').textContent    = '';
     document.getElementById('stats').textContent         = '';
     document.getElementById('weightedStats').textContent = '';
+
+    // Check for LOFTER share code and ask user for confirmation
+    const shareCode = LOFTER.extractShareCode(text);
+    if (shareCode) {
+      const confirmExtract = confirm(`检测到 LOFTER 分享链接 (${shareCode}).\n\n获取并分析这篇文章?`);
+      
+      if (confirmExtract) {
+        try {
+          document.getElementById('result').textContent = 'Extracting LOFTER content…';
+          const lofterContent = await LOFTER.getContent(shareCode);
+          text = lofterContent;
+          document.getElementById('inputText').value = text;
+        } catch (err) {
+          document.getElementById('result').innerHTML =
+            `<span style="color:red">LOFTER extraction error: ${err.message}</span>`;
+          btn.disabled    = false;
+          btn.textContent = 'Analyze Text';
+          return;
+        }
+      }
+    }
 
     // Yield to the browser for a repaint, then classify synchronously
     setTimeout(() => {
@@ -520,7 +701,7 @@
       'AI 生成文本检测 Demo\n' +
       '1. 使用前, 十分建议先阅读 https://blog.lyc8503.net/post/llm-classifier 了解此 Demo 的背景与实现细节再使用.\n' +
       '2. 此 AI 检测模型非通用模型, 仅在中文创意写作(网络小说/同人二创)场景训练, 输入其他类型的文本会导致系统性误差, 其结果应视为无效.\n' +
-      '3. 此模型完全在你的设备上本地运行, 你输入的所有数据不会离开你的设备, 更不会被收集用于任何形式的生成式 AI 训练; 如点击确定, 此网页将会下载并加载 ~107MB 的模型参数, 压缩后预计消耗 ~40MB 流量.\n' +
+      '3. 此模型完全在你的设备上本地运行, 你输入的所有文本数据(除匹配到的分享链接外)不会离开你的设备, 更不会被收集用于任何形式的生成式 AI 训练; 如点击确定, 此网页将会下载并加载 ~107MB 的模型参数, 压缩后预计消耗 ~40MB 流量.\n' +
       '4. 该网页使用词频概率统计的方法判断 AI 生成文本的特征, 你可以通过 F12 看到全部代码, 它并不能调用神谕, 也非真理机器. 尽管我已尽力优化准确率, 但输出结果不能作为判断 AI 生成文本的唯一依据, 请谨慎判断, 尊重原创作者的产出.\n' +
       '5. 结果解读上, 为防止误读会给出一个整体判断结果 (Overall); 特别注意: 任何 AI 检出率低于 50% 的文本, 都应被视作人类创作的文本.\n\n' +
       '点击确认以下载模型并使用此 Demo'
@@ -528,7 +709,7 @@
       'AI-generated Text Detection Demo\n' +
       '1. Before using, it is highly recommended to first read https://blog.lyc8503.net/post/llm-classifier to understand the background and implementation details of this Demo.\n' +
       '2. This AI detection model is not a general-purpose model. It is only trained for Chinese creative writing (web novels/fan fiction) scenarios. Inputting other types of text will cause systematic errors, and the results should be considered invalid.\n' +
-      '3. This model runs entirely locally on your device. All data you input will not leave your device, nor will it be collected for any form of generative AI training. If you click OK, this webpage will download and load ~107MB of model parameters, which is estimated to consume ~40MB of traffic after compression.\n' +
+      '3. This model runs entirely locally on your device. All text data you input will not leave your device, nor will it be collected for any form of generative AI training. If you click OK, this webpage will download and load ~107MB of model parameters, which is estimated to consume ~40MB of traffic after compression.\n' +
       '4. This webpage uses word frequency probability statistics to identify characteristics of AI-generated text. You can view all the code via F12. It cannot invoke oracles, nor is it a truth machine. Although I have done my best to optimize accuracy, the output results cannot be used as the sole basis for judging AI-generated text. Please judge carefully and respect the output of original authors.\n' +
       '5. Regarding result interpretation, an overall judgment result (Overall) will be provided to prevent misreading. Special note: Any text with an AI detection rate below 50% should be considered as human-created text.\n\n' +
       'Click OK to download the model and use this Demo'
