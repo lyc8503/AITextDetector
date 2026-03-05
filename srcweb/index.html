@@ -448,21 +448,82 @@
 
   // ── Model loading ─────────────────────────────────────────────────────────
 
+  const CACHE_NAME    = 'aidetect-models-v1';
+  const CACHE_URL     = 'models.json';
+  const CACHE_TTL_MS  = 5 * 24 * 60 * 60 * 1000;   // 5 days
+  const CACHE_TS_KEY  = 'models_cache_ts';
+
+  function hasFreshCache() {
+    try {
+      const ts = localStorage.getItem(CACHE_TS_KEY);
+      if (!ts) {
+        console.log('[cache] No timestamp found in localStorage — treating as cache miss.');
+        return false;
+      }
+      const age = Date.now() - parseInt(ts, 10);
+      const ttlLeft = CACHE_TTL_MS - age;
+      if (ttlLeft > 0) {
+        console.log(`[cache] Cache is fresh. Age: ${(age / 3600000).toFixed(1)}h, TTL remaining: ${(ttlLeft / 3600000).toFixed(1)}h.`);
+        return true;
+      } else {
+        console.log(`[cache] Cache expired. Age: ${(age / 3600000).toFixed(1)}h (TTL: ${CACHE_TTL_MS / 3600000}h).`);
+        return false;
+      }
+    } catch (e) {
+      console.warn('[cache] localStorage read failed:', e);
+      return false;
+    }
+  }
+
   async function loadModels() {
     const bar    = document.getElementById('loadingBar');
     const fill   = document.getElementById('loadingFill');
     const status = document.getElementById('loadingStatus');
 
-    bar.style.display = 'block';
-    fill.style.width  = '0%';
-    status.textContent = 'Downloading models.json…';
-
-    function fmtMB(bytes) {
-      return (bytes / 1048576).toFixed(1) + ' MB';
+    function fmtMB(bytes) { return (bytes / 1048576).toFixed(1) + ' MB'; }
+    function enableUI() {
+      document.getElementById('inputText').disabled  = false;
+      document.getElementById('analyzeBtn').disabled = false;
     }
 
+    // ── Try loading from Cache API ─────────────────────────────────────────
+    if (hasFreshCache()) {
+      try {
+        console.log('[cache] Opening Cache API:', CACHE_NAME);
+        const cache  = await caches.open(CACHE_NAME);
+        const cached = await cache.match(CACHE_URL);
+        if (cached) {
+          console.log('[cache] Cache hit — loading models from Cache API.');
+          bar.style.display  = 'block';
+          fill.style.width   = '80%';
+          status.textContent = 'Loading from local cache…';
+          await new Promise(r => setTimeout(r, 0));   // yield for repaint
+          const t0 = performance.now();
+          modelsData = await cached.json();
+          console.log(`[cache] models.json parsed in ${(performance.now() - t0).toFixed(0)}ms.`);
+          fill.style.width   = '100%';
+          status.textContent = `Ready (cached) — ${MODEL_NAMES.length} classifiers loaded.`;
+          enableUI();
+          setTimeout(() => { bar.style.display = 'none'; }, 800);
+          return;
+        } else {
+          console.warn('[cache] Cache API entry missing for', CACHE_URL, '— falling through to network fetch.');
+        }
+      } catch (e) {
+        console.warn('[cache] Cache API read failed:', e);
+      }
+    }
+
+    // ── Network fetch with progress ────────────────────────────────────────
+    bar.style.display  = 'block';
+    fill.style.width   = '0%';
+    status.textContent = 'Downloading models.json…';
+
     try {
-      const response = await fetch('models.json');
+      console.log('[fetch] Starting network fetch:', CACHE_URL);
+      const fetchStart = performance.now();
+      const response = await fetch(CACHE_URL);
+      console.log(`[fetch] Response received: HTTP ${response.status} in ${(performance.now() - fetchStart).toFixed(0)}ms.`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       // Content-Length is the *compressed* size (gzip); received bytes are
@@ -474,17 +535,27 @@
       const total = location.hostname === 'lyc8503.github.io'
         ? KNOWN_DECOMPRESSED
         : (contentLength ? parseInt(contentLength, 10) : null);
+      console.log(`[fetch] Content-Length header: ${contentLength ?? 'absent'}, using total: ${total ? fmtMB(total) : 'unknown'}.`);
+
+      const chunks = [];
+      let received = 0;
+      let lastLogMB = 0;
 
       if (response.body) {
         const reader = response.body.getReader();
-        const chunks = [];
-        let received = 0;
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
           received += value.length;
+
+          // Log every ~10 MB
+          const receivedMB = received / 1048576;
+          if (receivedMB - lastLogMB >= 10) {
+            lastLogMB = Math.floor(receivedMB / 10) * 10;
+            console.log(`[fetch] Downloaded ${fmtMB(received)}${total ? ' / ' + fmtMB(total) : ''}.`);
+          }
 
           if (total) {
             // Clamp ratio to [0, 1] so gzip decompression never overshoots
@@ -494,36 +565,49 @@
             status.textContent =
               `Downloading… ${fmtMB(received)} / ${fmtMB(total)} (${pct}%)`;
           } else {
-            fill.style.width = '40%';
+            fill.style.width   = '40%';
             status.textContent = `Downloading… ${fmtMB(received)}`;
           }
         }
-
-        // Parse phase: 80 % → 100 %
-        fill.style.width = '80%';
-        status.textContent = `Parsing models… (${fmtMB(received)} received)`;
-        await new Promise(r => setTimeout(r, 0));   // yield for repaint
-
-        const text = await new Blob(chunks).text();
-        modelsData = JSON.parse(text);
-      } else {
-        fill.style.width = '80%';
-        status.textContent = 'Parsing models…';
-        modelsData = await response.json();
       }
 
-      fill.style.width = '100%';
+      console.log(`[fetch] Download complete: ${fmtMB(received)} in ${(performance.now() - fetchStart).toFixed(0)}ms.`);
+
+      // Parse phase: 80 % → 100 %
+      fill.style.width   = '80%';
+      status.textContent = `Parsing models… (${fmtMB(received)} received)`;
+      await new Promise(r => setTimeout(r, 0));   // yield for repaint
+
+      console.log('[parse] Starting JSON parse…');
+      const parseStart = performance.now();
+      const blob = new Blob(chunks, { type: 'application/json' });
+      const text = await blob.text();
+      modelsData = JSON.parse(text);
+      console.log(`[parse] JSON parsed in ${(performance.now() - parseStart).toFixed(0)}ms. Models: ${Object.keys(modelsData).join(', ')}.`);
+
+      // ── Persist to Cache API ─────────────────────────────────────────────
+      try {
+        console.log('[cache] Persisting to Cache API…');
+        const cache = await caches.open(CACHE_NAME);
+        await cache.put(CACHE_URL, new Response(blob, {
+          headers: { 'Content-Type': 'application/json' }
+        }));
+        localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
+        console.log('[cache] Saved to Cache API. Timestamp written to localStorage.');
+      } catch (e) {
+        console.warn('[cache] Failed to persist to Cache API (quota exceeded or private mode):', e);
+      }
+
+      fill.style.width   = '100%';
       status.textContent = `Ready — ${MODEL_NAMES.length} classifiers loaded.`;
-
-      document.getElementById('inputText').disabled  = false;
-      document.getElementById('analyzeBtn').disabled = false;
-
+      enableUI();
       setTimeout(() => { bar.style.display = 'none'; }, 800);
 
     } catch (err) {
-      status.textContent = `⚠ Failed to load models: ${err.message}`;
+      console.error('[fetch] Fatal error loading models:', err);
+      status.textContent    = `⚠ Failed to load models: ${err.message}`;
       fill.style.background = '#dc3545';
-      fill.style.width = '100%';
+      fill.style.width      = '100%';
     }
   }
 
@@ -580,23 +664,28 @@
   // ── Bootstrap ─────────────────────────────────────────────────────────────
   {
     const isChinese = /^zh\b/i.test(navigator.language);
-    const _ = isChinese ? alert(
-      'AI 生成文本检测 Demo\n' +
-      '1. 使用前, 十分建议先阅读 https://blog.lyc8503.net/post/llm-classifier 了解此 Demo 的背景与实现细节再使用.\n' +
-      '2. 此 AI 检测模型非通用模型, 仅在中文创意写作(网络小说/同人二创)场景训练, 输入其他类型的文本会导致系统性误差, 其结果应视为无效.\n' +
-      '3. 此模型完全在你的设备上本地运行, 你输入的所有文本数据(除匹配到的链接外)不会离开你的设备, 更不会被收集用于任何形式的生成式 AI 训练; 如点击确定, 此网页将会下载并加载 ~107MB 的模型参数, 压缩后预计消耗 ~40MB 流量.\n' +
-      '4. 该网页使用词频概率统计的方法判断 AI 生成文本的特征, 你可以通过 F12 看到全部代码, 它并不能调用神谕, 也非真理机器. 尽管我已尽力优化准确率, 但输出结果不能作为判断 AI 生成文本的唯一依据, 请谨慎判断, 尊重原创作者的产出.\n' +
-      '5. 结果解读上, 为防止误读会给出一个整体判断结果 (Overall); 特别注意: 任何 AI 检出率低于 50% 的文本, 都应被视作人类创作的文本.\n\n' +
-      '点击确认以下载模型并使用此 Demo'
-    ) : alert(
-      'AI-generated Text Detection Demo\n' +
-      '1. Before using, it is highly recommended to first read https://blog.lyc8503.net/post/llm-classifier to understand the background and implementation details of this Demo.\n' +
-      '2. This AI detection model is not a general-purpose model. It is only trained for Chinese creative writing (web novels/fan fiction) scenarios. Inputting other types of text will cause systematic errors, and the results should be considered invalid.\n' +
-      '3. This model runs entirely locally on your device. All text data you input will not leave your device, nor will it be collected for any form of generative AI training. If you click OK, this webpage will download and load ~107MB of model parameters, which is estimated to consume ~40MB of traffic after compression.\n' +
-      '4. This webpage uses word frequency probability statistics to identify characteristics of AI-generated text. You can view all the code via F12. It cannot invoke oracles, nor is it a truth machine. Although I have done my best to optimize accuracy, the output results cannot be used as the sole basis for judging AI-generated text. Please judge carefully and respect the output of original authors.\n' +
-      '5. Regarding result interpretation, an overall judgment result (Overall) will be provided to prevent misreading. Special note: Any text with an AI detection rate below 50% should be considered as human-created text.\n\n' +
-      'Click OK to download the model and use this Demo'
-    );
+
+    // Only show the one-time prompt when there is no valid local cache.
+    if (!hasFreshCache()) {
+      const _ = isChinese ? alert(
+        'AI 生成文本检测 Demo\n' +
+        '1. 使用前, 十分建议先阅读 https://blog.lyc8503.net/post/llm-classifier 了解此 Demo 的背景与实现细节再使用.\n' +
+        '2. 此 AI 检测模型非通用模型, 仅在中文创意写作(网络小说/同人二创)场景训练, 输入其他类型的文本会导致系统性误差, 其结果应视为无效.\n' +
+        '3. 此模型完全在你的设备上本地运行, 你输入的所有文本数据(除匹配到的链接外)不会离开你的设备, 更不会被收集用于任何形式的生成式 AI 训练; 如点击确定, 此网页将会下载并加载 ~107MB 的模型参数, 压缩后预计消耗 ~40MB 流量.\n' +
+        '4. 该网页使用词频概率统计的方法判断 AI 生成文本的特征, 你可以通过 F12 看到全部代码, 它并不能调用神谕, 也非真理机器. 尽管我已尽力优化准确率, 但输出结果不能作为判断 AI 生成文本的唯一依据, 请谨慎判断, 尊重原创作者的产出.\n' +
+        '5. 结果解读上, 为防止误读会给出一个整体判断结果 (Overall); 特别注意: 任何 AI 检出率低于 50% 的文本, 都应被视作人类创作的文本.\n\n' +
+        '点击确认以下载模型并使用此 Demo'
+      ) : alert(
+        'AI-generated Text Detection Demo\n' +
+        '1. Before using, it is highly recommended to first read https://blog.lyc8503.net/post/llm-classifier to understand the background and implementation details of this Demo.\n' +
+        '2. This AI detection model is not a general-purpose model. It is only trained for Chinese creative writing (web novels/fan fiction) scenarios. Inputting other types of text will cause systematic errors, and the results should be considered invalid.\n' +
+        '3. This model runs entirely locally on your device. All text data you input will not leave your device, nor will it be collected for any form of generative AI training. If you click OK, this webpage will download and load ~107MB of model parameters, which is estimated to consume ~40MB of traffic after compression.\n' +
+        '4. This webpage uses word frequency probability statistics to identify characteristics of AI-generated text. You can view all the code via F12. It cannot invoke oracles, nor is it a truth machine. Although I have done my best to optimize accuracy, the output results cannot be used as the sole basis for judging AI-generated text. Please judge carefully and respect the output of original authors.\n' +
+        '5. Regarding result interpretation, an overall judgment result (Overall) will be provided to prevent misreading. Special note: Any text with an AI detection rate below 50% should be considered as human-created text.\n\n' +
+        'Click OK to download the model and use this Demo'
+      );
+    }
+
     loadModels();
   }
   </script>
