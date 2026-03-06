@@ -179,7 +179,7 @@
   <div id="loadingBar"><div class="fill" id="loadingFill"></div></div>
   <div id="loadingStatus">Model not loaded — confirm the download to start.</div>
 
-  <textarea id="inputText" placeholder="在此处输入网络小说或同人创作的中文内容，输入其他内容可能导致结果不准确 (Tip: 你也可以直接粘贴一个 LOFTER 链接(APP 内分享-复制链接)，如 https://example.lofter.com/post/a1b2c3d4_cafebabe) / Enter Chinese content from web novels or fan fiction here. Inputting other content may result in inaccurate output" disabled></textarea>
+  <textarea id="inputText" placeholder="在此处输入网络小说或同人创作的中文内容，建议至少 1000 字，输入过短或输入其他内容可能导致结果不准确 (Tip: 你也可以直接粘贴一个 LOFTER 链接(APP 内分享-复制链接)，如 https://example.lofter.com/post/a1b2c3d4_cafebabe) / Enter Chinese content from web novels or fan fiction here. Inputting other content may result in inaccurate output" disabled></textarea>
   <button id="analyzeBtn" disabled>Analyze Text</button>
 
   <div class="legend">
@@ -189,6 +189,7 @@
     <span style="color:#999">Hover highlighted text to see which models flagged it.</span>
   </div>
 
+  <div id="shortWarning"></div>
   <div id="verdict"></div>
   <div id="charStats"></div>
   <div id="modelStats"></div>
@@ -403,6 +404,16 @@
 
     const charPctNum = totalChars > 0 ? (aiChars / totalChars) * 100 : 0;
     const charPctStr = charPctNum.toFixed(1);
+
+    // ── Short-text warning ────────────────────────────────────────────────
+    const shortWarnDiv = document.getElementById('shortWarning');
+    if (totalChars < 1000 || totalChunks < 10) {
+      shortWarnDiv.style.cssText = 'background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:4px;padding:6px 10px;margin:12px 0;font-size:13px;';
+      shortWarnDiv.textContent = '⚠ Warning: Input text is too short — results may be unreliable.';
+    } else {
+      shortWarnDiv.style.cssText = '';
+      shortWarnDiv.textContent = '';
+    }
 
     // ── Verdict ──────────────────────────────────────────────────────────
     let verdictLabel, verdictClass;
@@ -627,6 +638,7 @@
     document.getElementById('modelStats').textContent    = '';
     document.getElementById('stats').textContent         = '';
     document.getElementById('weightedStats').textContent = '';
+    document.getElementById('shortWarning').textContent  = '';
 
     // Check for LOFTER link
     const lofterMatch = LOFTER.extractLink(text);
